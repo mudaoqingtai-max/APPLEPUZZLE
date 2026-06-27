@@ -53,6 +53,13 @@ async function ensureAuth(){
   try{ await signInAnonymously(fbAuth); return fbAuth.currentUser; }
   catch(e){ throw new Error("認証エラー: "+e.code); }
 }
+// タイムアウト付きPromise（応答が返らないと固まるのを防ぐ）
+function withTimeout(promise,ms){
+  return Promise.race([
+    promise,
+    new Promise(function(_,rej){setTimeout(function(){rej(new Error("timeout"));},ms);})
+  ]);
+}
 // 難易度別ランキング読み込み（time昇順=速い順）
 async function loadLBFirebase(boardSize){
   try{
@@ -69,13 +76,19 @@ async function loadLBFirebase(boardSize){
   }catch(e){ console.warn("LB fetch failed",e); return []; }
 }
 async function addToLBFirebase(name,timeMs,boardSize){
-  var user=await ensureAuth();
-  await addDoc(FB_COL(),{
+  var user=await withTimeout(ensureAuth(),5000);
+  // 登録（5秒タイムアウト）。ここが成功すれば登録は完了
+  await withTimeout(addDoc(FB_COL(),{
     name:name, time:timeMs, size:boardSize,
     date:new Date().toISOString().slice(0,10),
     uid:user.uid
-  });
-  return await loadLBFirebase(boardSize);
+  }),5000);
+  // 登録は完了。ランキング読み直しは「おまけ」なので、失敗・遅延しても登録成功は変わらない
+  try{
+    return await withTimeout(loadLBFirebase(boardSize),5000);
+  }catch(e){
+    return null; // 読み直し失敗でも登録は成功しているので、nullを返して成功扱い
+  }
 }
 window.__fbLB = { loadLBFirebase, addToLBFirebase, ensureAuth };
 </script>
@@ -380,6 +393,7 @@ function App(){
   var _pn=useState(""),pName=_pn[0],setPName=_pn[1];
   var _sub=useState(false),submitted=_sub[0],setSub=_sub[1];
   var _subL=useState(false),subLoad=_subL[0],setSubLoad=_subL[1];
+  var _subE=useState(false),subErr=_subE[0],setSubErr=_subE[1];
 
   var timerRef=useRef(null),startRef=useRef(0),placedRef=useRef({});
   placedRef.current=placed;
@@ -429,7 +443,7 @@ function App(){
     clearInterval(timerRef.current);
     setSize(s);setStage(stg===undefined?null:stg);setPlaced({});setErrors({});
     setCleared(false);setElapsed(0);setPuzzle(null);setScreen("game");setGenerating(true);
-    setSub(false);setPName("");
+    setSub(false);setSubErr(false);setPName("");
     setTimeout(function(){
       var seed=stg!=null&&stg!==undefined?stageSeed(s,stg):null;
       var p=generatePuzzle(s,seed);
@@ -479,10 +493,14 @@ function App(){
 
   function fetchLB(s){setLbFetching(true);loadLB(s).then(function(data){setLb(data);setLbFetching(false)});}
   function handleSubmitScore(){
-    if(!pName.trim()||submitted||mode!=="timeattack")return;
-    setSubLoad(true);
+    if(!pName.trim()||submitted||subLoad||mode!=="timeattack")return;
+    setSubLoad(true);setSubErr(false);
     addToLB(pName.trim().slice(0,12),clearTime,size).then(function(board){
-      setLb(board);setSub(true);setSubLoad(false);setLbSize(size);
+      // board=null は「登録成功・ランキング読み直しのみ失敗」。登録は完了しているので成功扱い
+      if(board)setLb(board);
+      setSub(true);setSubLoad(false);setLbSize(size);
+    }).catch(function(){
+      setSubLoad(false);setSubErr(true); // 登録そのものが失敗→ボタン復活＋エラー表示で再試行可能に
     });
   }
 
@@ -595,11 +613,13 @@ function App(){
           h("div",{style:{fontSize:18,fontWeight:900,color:"#FF6B6B",fontVariantNumeric:"tabular-nums"}},fmt(best)),
           h("div",{style:{fontSize:11,color:"#AAA",marginTop:2}},"ベスト")):h("div",{style:{height:8}}),
         isTA?(submitted?h("div",{style:{color:"#27AE60",fontSize:"0.85rem",fontWeight:700,marginBottom:24}},"ランキングに登録しました！"):
-          h("div",{style:{display:"flex",gap:8,marginBottom:26}},
-            h("input",{type:"text",placeholder:"名前を入力",maxLength:12,value:pName,
-              onChange:function(e){setPName(e.target.value)},
-              style:{flex:1,minWidth:0,padding:"11px 14px",borderRadius:14,border:"1.5px solid #DDD",background:"white",color:"#333",fontSize:"16px",outline:"none"}}),
-            h("button",{onClick:handleSubmitScore,style:{flexShrink:0,padding:"11px 16px",borderRadius:14,border:"none",background:pName.trim()?"linear-gradient(135deg,#5DADE2,#AF7AC5)":"#EEE",color:pName.trim()?"#fff":"#AAA",fontWeight:800,fontSize:"0.85rem",cursor:pName.trim()?"pointer":"default",whiteSpace:"nowrap"}},subLoad?"...":"登録"))):null,
+          h("div",{style:{marginBottom:26}},
+            h("div",{style:{display:"flex",gap:8}},
+              h("input",{type:"text",placeholder:"名前を入力",maxLength:12,value:pName,
+                onChange:function(e){setPName(e.target.value)},
+                style:{flex:1,minWidth:0,padding:"11px 14px",borderRadius:14,border:"1.5px solid #DDD",background:"white",color:"#333",fontSize:"16px",outline:"none"}}),
+              h("button",{onClick:handleSubmitScore,disabled:subLoad,style:{flexShrink:0,padding:"11px 16px",borderRadius:14,border:"none",background:(pName.trim()&&!subLoad)?"linear-gradient(135deg,#5DADE2,#AF7AC5)":"#EEE",color:(pName.trim()&&!subLoad)?"#fff":"#AAA",fontWeight:800,fontSize:"0.85rem",cursor:(pName.trim()&&!subLoad)?"pointer":"default",whiteSpace:"nowrap"}},subLoad?"...":"登録")),
+            subErr?h("div",{style:{color:"#e74c3c",fontSize:"0.75rem",fontWeight:700,marginTop:8,textAlign:"center"}},"登録できませんでした。もう一度お試しください"):null)):null,
         h("div",{style:{display:"flex",gap:12}},
           isTA?h("button",{style:ST.btnSecondary,onClick:function(){setScreen("modeSelect")}},"← 戻る"):null,
           isTA?h("button",{style:ST.btnPrimary,onClick:function(){beginGame(size,stage)}},"もう一回"):null,
