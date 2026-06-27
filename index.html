@@ -383,18 +383,25 @@ function App(){
 
   var timerRef=useRef(null),startRef=useRef(0),placedRef=useRef({});
   placedRef.current=placed;
-  var bestRef=useRef({}),stagesRef=useRef({});
+  var bestRef=useRef({}),stagesRef=useRef({}),loadedRef=useRef(false);
   bestRef.current=bestTimes;stagesRef.current=stageClears;
 
   useEffect(function(){
-    dbGet("best").then(function(d){if(d)setBestTimes(d)});
-    dbGet("stages").then(function(d){if(d)setStageClears(d)});
-    dbGet("muted").then(function(d){if(d){muted=d;setMutedS(d)}});
+    // データ読み込み（完了したらloadedRefをtrueに）
+    Promise.all([
+      dbGet("best").then(function(d){if(d)setBestTimes(d);}),
+      dbGet("stages").then(function(d){if(d)setStageClears(d);}),
+      dbGet("muted").then(function(d){if(d){muted=d;setMutedS(d);}})
+    ]).then(function(){loadedRef.current=true;}).catch(function(){loadedRef.current=true;});
     // Firebase認証を事前に済ませてランキング読み込みを高速化
     try{if(window.__fbLB&&window.__fbLB.ensureAuth)window.__fbLB.ensureAuth();}catch(e){}
-    // ページ非表示・離脱の瞬間に最新データを確実に保存（タスクキル対策）
+    // ページ非表示・離脱の瞬間に最新データを保存（読み込み完了後のみ＝空上書き防止）
     function flush(){
-      try{lsSet("best",bestRef.current);lsSet("stages",stagesRef.current);}catch(e){}
+      if(!loadedRef.current)return; // 読み込み前は保存しない（空データ上書き防止）
+      try{
+        if(bestRef.current&&Object.keys(bestRef.current).length>0)lsSet("best",bestRef.current);
+        if(stagesRef.current&&Object.keys(stagesRef.current).length>0)lsSet("stages",stagesRef.current);
+      }catch(e){}
     }
     document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")flush();});
     window.addEventListener("pagehide",flush);
@@ -451,17 +458,20 @@ function App(){
       setClearTime(t);setCleared(true);setElapsed(t);
       clearInterval(timerRef.current);stopBGM();sfxClear();vib([30,30,60]);
       if(mode==="timeattack"){
-        setBestTimes(function(prev){
-          var nb={};for(var k in prev)nb[k]=prev[k];
-          if(!nb[size]||t<nb[size]){nb[size]=t;dbSet("best",nb);}
-          return nb;
-        });
+        // 保存値を先に計算してから保存（setState外で確実に実行）
+        var prevBest=bestRef.current||{};
+        var nb={};for(var k in prevBest)nb[k]=prevBest[k];
+        if(!nb[size]||t<nb[size]){nb[size]=t;}
+        bestRef.current=nb;
+        dbSet("best",nb);
+        setBestTimes(nb);
       }else{
-        setStageClears(function(prev){
-          var ns={};for(var k in prev)ns[k]=prev[k];
-          ns[size+"-"+stage]=1;dbSet("stages",ns);
-          return ns;
-        });
+        var prevStg=stagesRef.current||{};
+        var ns={};for(var k2 in prevStg)ns[k2]=prevStg[k2];
+        ns[size+"-"+stage]=1;
+        stagesRef.current=ns;
+        dbSet("stages",ns);
+        setStageClears(ns);
       }
       setTimeout(function(){setScreen("clear")},700);
     }
